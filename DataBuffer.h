@@ -24,6 +24,7 @@
 #include <iostream>
 
 using std::tr1::shared_ptr;
+using std::tr1::enable_shared_from_this;
 
 namespace netflix {
 namespace base {
@@ -52,9 +53,10 @@ private:
     unsigned char *data;
     int size, capacity;
     enum State {
-        Pool,
-        Allocated,
-        Other
+        FromRawData,
+        Used,
+        Unused,
+        Allocated
     } state;
     shared_ptr<DataPool> pool;
 
@@ -194,17 +196,23 @@ public:
     DataBuffer compress(CompressionMode mode, bool *ok = 0) const;
     DataBuffer uncompress(CompressionMode mode, bool *ok = 0) const;
 private:
+    DataBuffer(const shared_ptr<DataChunk> &chunk)
+        : mData(chunk)
+    {}
     typedef DataChunk Data;
     shared_ptr<Data> mData;
 
     static void countStats(int count);
+    friend class DataPool;
 };
 
-class DataPool // : public Noncopyable
+class DataPool : public enable_shared_from_this<DataPool> // Noncopyable
 {
 public:
-    DataPool()
-    {}
+    DataPool();
+    ~DataPool();
+
+    void init(int size);
     void lock()
     {
         mMutex.lock();
@@ -215,18 +223,23 @@ public:
         mMutex.unlock();
     }
 
-    void defrag();
+    void defrag() { ScopedMutex lock(mMutex); defrag_helper(); }
+    DataBuffer create(int size);
+    int size() const { ScopedMutex lock(mMutex); return mSize; }
+    int used() const { ScopedMutex lock(mMutex); return mUsed; }
+    void dump();
 private:
+    void defrag_helper();
+    typedef DataChunk Chunk;
+    void resize(Chunk *chunk, int size);
+    void split(std::list<shared_ptr<Chunk> >::iterator it, int size);
 
-    // void release(DataChunk *chunk);
-    void resize(DataChunk *chunk, int size);
-
-    unsigned char *mPool;
-    int mSize;
-    std::list<shared_ptr<DataChunk> > mChunks;
+    unsigned char *mData;
+    int mSize, mUsed;
+    std::list<shared_ptr<Chunk> > mChunks;
     friend class DataBuffer;
     friend class DataChunk;
-    Mutex mMutex;
+    mutable Mutex mMutex;
 };
 
 template <typename T>
@@ -236,6 +249,38 @@ inline DataPointer<T>::Data::~Data()
         pool->unlock();
 }
 
+inline DataChunk::DataChunk()
+    : data(0), size(0), capacity(0), state(Allocated)
+{
+
+}
+
+inline DataChunk::~DataChunk()
+{
+    if (state == Allocated && data) {
+        assert(!pool);
+        free(data);
+    }
+
+}
+
+inline void DataChunk::resize(int size)
+{
+    if (pool) {
+        pool->resize(this, size);
+    } else {
+        capacity = size;
+        data = reinterpret_cast<unsigned char*>(realloc(data, capacity + 1));
+    }
+    // unsigned char *data;
+    // int size, capacity;
+    // enum State {
+    //     Pool,
+    //     Alloced,
+    //     FromRawData
+    // } state;
+
+}
 
 inline DataBuffer::DataBuffer(int cap)
 {
@@ -277,7 +322,7 @@ inline DataBuffer DataBuffer::fromRawData(const unsigned char *data, int size)
     if (!data || !size)
         return ret;
     ret.mData.reset(new Data);
-    ret.mData->state = Data::Other;
+    ret.mData->state = Data::FromRawData;
     ret.mData->data = const_cast<unsigned char*>(data); // awful
     ret.mData->size = size;
     return ret;
@@ -289,7 +334,7 @@ inline DataBuffer DataBuffer::fromRawData(const char *data, int size)
     if (!data || !size)
         return ret;
     ret.mData.reset(new Data);
-    ret.mData->state = Data::Other;
+    ret.mData->state = Data::FromRawData;
     ret.mData->data = const_cast<unsigned char*>(reinterpret_cast<const unsigned char*>(data)); // awful
     ret.mData->size = size;
     return ret;
@@ -338,7 +383,7 @@ inline void DataBuffer::clear()
 
 inline void DataBuffer::reserve(int cap)
 {
-    assert(!mData || mData->state != Data::Other);
+    assert(!mData || mData->state != Data::FromRawData);
     assert(!mData || mData.use_count() == 1);
     assert(cap >= 0);
     if (cap) {
@@ -368,7 +413,7 @@ template <typename T> inline void DataBuffer::append(const T *t, int len)
         if (!mData) {
             reserve(len);
         } else {
-            assert(mData->state != Data::Other);
+            assert(mData->state != Data::FromRawData);
             assert(mData.use_count() == 1);
             const int available = mData->capacity - mData->size;
             if (available < len) {
@@ -409,7 +454,7 @@ inline void DataBuffer::append(const std::string &data)
 inline void DataBuffer::replace(int index, int len, const DataBuffer &value)
 {
     assert(mData.use_count() == 1);
-    assert(mData->state != Data::Other);
+    assert(mData->state != Data::FromRawData);
     if (!len || index + len > mData->size)
         return;
 
@@ -575,7 +620,7 @@ inline int DataBuffer::capacity() const
 inline void DataBuffer::setUsed(int size)
 {
     assert(mData);
-    assert(mData->state != Data::Other);
+    assert(mData->state != Data::FromRawData);
     assert(size <= mData->capacity);
     mData->size = size;
     if (size > 0)
@@ -584,7 +629,7 @@ inline void DataBuffer::setUsed(int size)
 
 inline bool DataBuffer::ownsData() const
 {
-    return mData && mData->state != Data::Other;
+    return mData && mData->state != Data::FromRawData;
 }
 
 inline bool DataBuffer::isBinary(int max) const
