@@ -30,7 +30,7 @@ void DataBuffer::countStats(int /* count */)
 // }
 
 DataPool::DataPool()
-    : mData(0), mSize(0), mUsed(0)
+    : mData(0), mSize(0)
 {
 }
 
@@ -45,13 +45,12 @@ void DataPool::init(int size)
     assert(size);
     assert(!mData);
     assert(!mSize);
-    assert(!mUsed);
     mData = reinterpret_cast<unsigned char*>(malloc(size));
     mSize = size;
     shared_ptr<Chunk> chunk(new Chunk);
     chunk->pool = shared_from_this();
     chunk->capacity = size;
-    chunk->state = DataChunk::Unused;
+    chunk->state = Chunk::Pool;
     chunk->data = mData;
     mChunks.push_back(chunk);
 }
@@ -59,21 +58,33 @@ void DataPool::init(int size)
 DataBuffer DataPool::create(int size)
 {
     ScopedMutex lock(mMutex);
-    if (size <= mSize - mUsed) {
+    if (size <= mSize) {
         assert(!mChunks.empty());
         std::list<shared_ptr<Chunk> >::iterator it = mChunks.end();
         while (true) {
             if (it == mChunks.begin())
                 break;
-            mUsed += size;
-            shared_ptr<Chunk> &c = *--it;
-            if (c->state == Chunk::Unused && c->capacity >= size) {
-                const int extra = c->capacity - size;
-                if (extra > std::min(1024, size / 2)) {
-                    split(it, size);
+            --it;
+            if (it->use_count() == 1) {
+                Chunk *c = (*it).get();
+                while (c->capacity < size && it != mChunks.begin()) {
+                    std::list<shared_ptr<Chunk> >::iterator tmp = it;
+                    --tmp;
+                    shared_ptr<Chunk> &t = *tmp;
+                    if (t.use_count() == 1) {
+                        t->capacity += c->capacity;
+                        mChunks.erase(it);
+                        it = tmp;
+                        c = t.get();
+                    }
                 }
-                c->state = Chunk::Used;
-                return DataBuffer(c);
+                if (c->capacity >= size) {
+                    const int extra = c->capacity - size;
+                    if (extra > std::min(1024, size / 2)) {
+                        split(it, size);
+                    }
+                    return DataBuffer(*it);
+                }
             }
         }
         defrag_helper();
@@ -81,9 +92,42 @@ DataBuffer DataPool::create(int size)
     return DataBuffer(size);
 }
 
-void DataPool::defrag_helper() // lock always held
+int DataPool::defrag_helper() // lock always held
 {
+    if (mChunks.size() == 1) {
+        shared_ptr<Chunk> &c = *mChunks.begin();
+        assert(c->capacity == mSize);
+        return mChunks.begin()->use_count() == 1 ? mSize : 0;
+    }
 
+    unsigned char *write = mData;
+
+    // std::list<shared_ptr<Chunk> >::iterator insert = mChunks.begin();
+    std::list<shared_ptr<Chunk> >::iterator it = mChunks.begin();
+    int removed = 0;
+    while (it != mChunks.end()) {
+        shared_ptr<Chunk> &c = *it;
+        assert(c->state == Chunk::Pool);
+        if (c.use_count() == 1) {
+            removed += c->capacity;
+            it = mChunks.erase(it);
+        } else {
+            if (c->data > write) {
+                memmove(write, c->data, c->size);
+                c->data = write;
+            }
+            write += c->capacity;
+            ++it;
+        }
+    }
+    if (removed) {
+        shared_ptr<Chunk> newChunk(new Chunk);
+        newChunk->pool = shared_from_this();
+        newChunk->capacity = removed;
+        newChunk->data = mData + mSize - removed;;
+        newChunk->state = Chunk::Pool;
+        mChunks.insert(mChunks.end(), newChunk);
+    }
 }
 
 void DataPool::split(std::list<shared_ptr<Chunk> >::iterator it, int size)
@@ -95,7 +139,7 @@ void DataPool::split(std::list<shared_ptr<Chunk> >::iterator it, int size)
     newChunk->pool = c->pool;
     newChunk->capacity = c->capacity - size;
     newChunk->data = c->data + size;
-    newChunk->state = Chunk::Unused;
+    newChunk->state = Chunk::Pool;
     c->capacity = size;
     mChunks.insert(++it, newChunk);
 }
@@ -105,12 +149,13 @@ void DataPool::dump()
     int pos = 0;
     for (std::list<shared_ptr<Chunk> >::const_iterator it = mChunks.begin(); it != mChunks.end(); ++it) {
         const shared_ptr<Chunk> &c = *it;
-        assert(c->state == Chunk::Used || c->state == Chunk::Unused);
+        assert(c->state == Chunk::Pool);
         const DataBuffer tmp = DataBuffer::fromRawData(c->data, c->capacity);
-        printf("ptr: %p pos: %d size: %d state: %s data: %s\n",
+        printf("%s ptr: %p pos: %d size: %d data: %s\n",
+               it->use_count() == 1 ? " " : "*",
                c->data, pos, c->capacity,
-               c->state == Chunk::Used ? "used" : "unused",
                tmp.isBinary() ? "(binary)" : std::string(reinterpret_cast<const char *>(c->data), std::min<int>(10, c->capacity)).c_str());
+
         pos += c->capacity;
     }
 }

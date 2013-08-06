@@ -9,9 +9,19 @@ using namespace netflix::base;
 int main(int argc, char **argv)
 {
     shared_ptr<DataPool> pool(new DataPool);
-    pool->init(1024);
-    pool->dump();
-    DataBuffer buf = pool->create(512);
+    pool->init(100);
+    // pool->dump();
+    DataBuffer buf1 = pool->create(50);
+    DataBuffer buf2 = pool->create(50);
+    buf2.clear();
+    buf1.clear();
+    DataBuffer buf3 = pool->create(60);
+    DataBuffer buf4 = pool->create(10);
+    buf3.clear();
+    pool->defrag();
+
+    // buf2.clear();
+    // buf2 = pool->create(20);
     pool->dump();
     // // DataPointer<const char*> foo;
     // // ::foo(foo);

@@ -54,8 +54,7 @@ private:
     int size, capacity;
     enum State {
         FromRawData,
-        Used,
-        Unused,
+        Pool,
         Allocated
     } state;
     shared_ptr<DataPool> pool;
@@ -226,16 +225,15 @@ public:
     void defrag() { ScopedMutex lock(mMutex); defrag_helper(); }
     DataBuffer create(int size);
     int size() const { ScopedMutex lock(mMutex); return mSize; }
-    int used() const { ScopedMutex lock(mMutex); return mUsed; }
     void dump();
 private:
-    void defrag_helper();
+    int defrag_helper();
     typedef DataChunk Chunk;
     void resize(Chunk *chunk, int size);
     void split(std::list<shared_ptr<Chunk> >::iterator it, int size);
 
     unsigned char *mData;
-    int mSize, mUsed;
+    int mSize;
     std::list<shared_ptr<Chunk> > mChunks;
     friend class DataBuffer;
     friend class DataChunk;
