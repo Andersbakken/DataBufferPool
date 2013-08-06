@@ -11,9 +11,10 @@
 #define DataBuffer_h
 
 #include <string.h>
-#include <nrdbase/tr1.h>
-#include <nrdbase/Noncopyable.h>
+#include <tr1/memory>
+// #include <nrdbase/Noncopyable.h>
 #include <vector>
+#include <set>
 #include <string>
 #include <ctype.h>
 #include <stdlib.h>
@@ -22,8 +23,82 @@
 #include <zlib.h>
 #include <iostream>
 
+using std::tr1::shared_ptr;
+
 namespace netflix {
 namespace base {
+
+class Mutex
+{
+public:
+    void lock() {}
+    void unlock() {}
+};
+
+class DataPool // : public Noncopyable
+{
+public:
+    DataPool()
+    {}
+    void lock()
+    {
+        mMutex.lock();
+    }
+
+    void unlock()
+    {
+        mMutex.unlock();
+    }
+
+    void defrag();
+private:
+    struct Chunk {
+        Chunk();
+        ~Chunk();
+
+        unsigned char *data;
+        int size, capacity;
+        enum State {
+            Pool,
+            Alloced,
+            Other
+        } state;
+        shared_ptr<DataPool> pool;
+        void resize(int size);
+        void free();
+    };
+
+    char *mPool;
+    int mSize;
+    std::set<shared_ptr<Chunk> > mChunks;
+    friend class DataBuffer;
+    Mutex mMutex;
+};
+
+template <typename T>
+class DataPointer
+{
+public:
+    DataPointer(const shared_ptr<DataPool> &pool, T t)
+        : mData(new Data(pool, t))
+    {}
+    DataPointer() {}
+    operator T() { return mData ? mData->data : 0; }
+private:
+    struct Data {
+        Data(const shared_ptr<DataPool> &p, T t)
+            : pool(p), data(t)
+        {}
+        ~Data()
+        {
+            if (pool)
+                pool->unlock();
+        }
+        shared_ptr<DataPool> pool;
+        T data;
+    };
+    shared_ptr<Data> mData;
+};
 
 class DataBuffer
 {
@@ -123,15 +198,7 @@ public:
     DataBuffer compress(CompressionMode mode, bool *ok = 0) const;
     DataBuffer uncompress(CompressionMode mode, bool *ok = 0) const;
 private:
-    struct Data : public Noncopyable
-    {
-        Data();
-        ~Data();
-
-        unsigned char *data;
-        int size, capacity;
-        bool ownsData;
-    };
+    typedef DataPool::Chunk Data;
     shared_ptr<Data> mData;
 
     static void countStats(int count);
@@ -177,7 +244,7 @@ inline DataBuffer DataBuffer::fromRawData(const unsigned char *data, int size)
     if (!data || !size)
         return ret;
     ret.mData.reset(new Data);
-    ret.mData->ownsData = false;
+    ret.mData->state = Data::Other;
     ret.mData->data = const_cast<unsigned char*>(data); // awful
     ret.mData->size = size;
     return ret;
@@ -189,7 +256,7 @@ inline DataBuffer DataBuffer::fromRawData(const char *data, int size)
     if (!data || !size)
         return ret;
     ret.mData.reset(new Data);
-    ret.mData->ownsData = false;
+    ret.mData->state = Data::Other;
     ret.mData->data = const_cast<unsigned char*>(reinterpret_cast<const unsigned char*>(data)); // awful
     ret.mData->size = size;
     return ret;
@@ -238,7 +305,7 @@ inline void DataBuffer::clear()
 
 inline void DataBuffer::reserve(int cap)
 {
-    assert(!mData || mData->ownsData);
+    assert(!mData || mData->state == Data::Other);
     assert(!mData || mData.use_count() == 1);
     assert(cap >= 0);
     if (cap) {
@@ -266,7 +333,7 @@ template <typename T> inline void DataBuffer::append(T *t, int len)
         if (!mData) {
             reserve(len);
         } else {
-            assert(mData->ownsData);
+            assert(mData->state != Data::Other);
             assert(mData.use_count() == 1);
             const int available = mData->capacity - mData->size;
             if (available < len) {
@@ -306,7 +373,7 @@ inline void DataBuffer::append(const std::string &data)
 inline void DataBuffer::replace(int index, int len, const DataBuffer &value)
 {
     assert(mData.use_count() == 1);
-    assert(mData->ownsData);
+    assert(mData->state != Data::Other);
     if (!len || index + len > mData->size)
         return;
 
@@ -453,7 +520,7 @@ inline int DataBuffer::capacity() const
 inline void DataBuffer::setUsed(int size)
 {
     assert(mData);
-    assert(mData->ownsData);
+    assert(mData->state != Data::Other);
     assert(size <= mData->capacity);
     mData->size = size;
     if (size > 0)
@@ -462,7 +529,7 @@ inline void DataBuffer::setUsed(int size)
 
 inline bool DataBuffer::ownsData() const
 {
-    return mData && mData->ownsData;
+    return mData && mData->state != Data::Other;
 }
 
 inline bool DataBuffer::isBinary(int max) const
