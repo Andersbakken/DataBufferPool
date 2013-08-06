@@ -2,3 +2,6 @@
 /defrag
 /Makefile
 /DataBuffer.o
+/.gdb_brestore
+/.gdb_brestore.txt
+/.gdb_history
