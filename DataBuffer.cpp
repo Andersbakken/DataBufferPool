@@ -29,19 +29,19 @@ void DataBuffer::countStats(int /* count */)
 //     // ObjectCount::ref("DataBuffer");
 // }
 
-DataPool::Chunk::Chunk()
+DataChunk::DataChunk()
     : data(0), size(0), capacity(0), state(Allocated)
 {
 
 }
 
-DataPool::Chunk::~Chunk()
+DataChunk::~DataChunk()
 {
     if (!pool && data)
         free(data);
 }
 
-void DataPool::Chunk::resize(int size)
+void DataChunk::resize(int size)
 {
     if (pool) {
         pool->resize(this, size);
@@ -59,13 +59,13 @@ void DataPool::Chunk::resize(int size)
 
 }
 
-void DataPool::resize(Chunk *chunk, int size)
+void DataPool::resize(DataChunk *chunk, int size)
 {
 
 }
 
 
-// void DataPool::Chunk::release()
+// void DataPool::DataChunk::release()
 // {
 //     if (pool) {
 //         pool->release(data, capacity);

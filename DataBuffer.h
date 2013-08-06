@@ -41,72 +41,59 @@ public:
     ScopedMutex(Mutex &) {}
 };
 
-class DataPool // : public Noncopyable
+class DataPool;
+class DataChunk
 {
 public:
-    DataPool()
-    {}
-    void lock()
-    {
-        mMutex.lock();
-    }
-
-    void unlock()
-    {
-        mMutex.unlock();
-    }
-
-    void defrag();
+    ~DataChunk();
 private:
-    struct Chunk {
-        Chunk();
-        ~Chunk();
+    DataChunk();
 
-        unsigned char *data;
-        int size, capacity;
-        enum State {
-            Pool,
-            Allocated,
-            Other
-        } state;
-        shared_ptr<DataPool> pool;
+    unsigned char *data;
+    int size, capacity;
+    enum State {
+        Pool,
+        Allocated,
+        Other
+    } state;
+    shared_ptr<DataPool> pool;
 
-        void resize(int size);
-    };
-
-    // void release(Chunk *chunk);
-    void resize(Chunk *chunk, int size);
-
-    unsigned char *mPool;
-    int mSize;
-    std::list<shared_ptr<Chunk> > mChunks;
+    void resize(int size);
+    friend class DataPool;
     friend class DataBuffer;
-    Mutex mMutex;
 };
 
 template <typename T>
 class DataPointer
 {
 public:
-    DataPointer(const shared_ptr<DataPool> &pool, T t)
-        : mData(new Data(pool, t))
-    {}
-    DataPointer() {}
-    operator T() { return mData ? mData->data : 0; }
+
+    operator T() { return mData; }
+    operator const T() const { return mData; }
+
+    T data()  { return mData; }
+    const T data() const { return mData; }
 private:
+    DataPointer(const shared_ptr<DataPool> &pool, T t)
+        : mData(t)
+    {
+        if (pool)
+            mPool.reset(new Data(pool));
+    }
+    DataPointer() : mData(0) {}
+
     struct Data {
-        Data(const shared_ptr<DataPool> &p, T t)
-            : pool(p), data(t)
+        Data(const shared_ptr<DataPool> &p)
+            : pool(p)
         {}
-        ~Data()
-        {
-            if (pool)
-                pool->unlock();
-        }
+        ~Data();
+
         shared_ptr<DataPool> pool;
-        T data;
     };
-    shared_ptr<Data> mData;
+    T mData;
+    shared_ptr<Data> mPool;
+
+    friend class DataBuffer;
 };
 
 class DataBuffer
@@ -129,7 +116,7 @@ public:
     inline void clear();
     inline void reserve(int cap);
 
-    template <typename T> inline void append(T *d, int len);
+    template <typename T> inline void append(const T *d, int len);
     template <typename T> inline void append(T t);
     inline void append(const std::string &data);
     inline void append(const char *nullTerminated);
@@ -158,11 +145,11 @@ public:
     inline bool empty() const;
     inline int capacity() const;
 
-    inline const char *c_str() const;
-    inline unsigned char *data();
-    inline const unsigned char *data() const;
-    template <typename T> inline T data();
-    template <typename T> inline const T data() const;
+    inline DataPointer<const char*> c_str() const;
+    inline DataPointer<unsigned char*> data();
+    inline DataPointer<const unsigned char*> data() const;
+    template <typename T> inline DataPointer<T> data();
+    template <typename T> inline DataPointer<const T> data() const;
 
     inline bool ownsData() const;
 
@@ -207,11 +194,48 @@ public:
     DataBuffer compress(CompressionMode mode, bool *ok = 0) const;
     DataBuffer uncompress(CompressionMode mode, bool *ok = 0) const;
 private:
-    typedef DataPool::Chunk Data;
+    typedef DataChunk Data;
     shared_ptr<Data> mData;
 
     static void countStats(int count);
 };
+
+class DataPool // : public Noncopyable
+{
+public:
+    DataPool()
+    {}
+    void lock()
+    {
+        mMutex.lock();
+    }
+
+    void unlock()
+    {
+        mMutex.unlock();
+    }
+
+    void defrag();
+private:
+
+    // void release(DataChunk *chunk);
+    void resize(DataChunk *chunk, int size);
+
+    unsigned char *mPool;
+    int mSize;
+    std::list<shared_ptr<DataChunk> > mChunks;
+    friend class DataBuffer;
+    friend class DataChunk;
+    Mutex mMutex;
+};
+
+template <typename T>
+inline DataPointer<T>::Data::~Data()
+{
+    if (pool)
+        pool->unlock();
+}
+
 
 inline DataBuffer::DataBuffer(int cap)
 {
@@ -335,7 +359,7 @@ inline void DataBuffer::reserve(int cap)
     }
 }
 
-template <typename T> inline void DataBuffer::append(T *t, int len)
+template <typename T> inline void DataBuffer::append(const T *t, int len)
 {
     if (len) {
         (void)static_cast<long long>(T());
@@ -368,7 +392,8 @@ template <typename T> inline void DataBuffer::append(T t)
 
 inline void DataBuffer::append(const DataBuffer &buffer)
 {
-    append(buffer.data(), buffer.size());
+    DataPointer<const unsigned char*> ptr = buffer.data();
+    append(ptr.data(), buffer.size());
 }
 
 inline void DataBuffer::append(const char *nullTerminated)
@@ -497,30 +522,49 @@ inline bool DataBuffer::empty() const
     return isEmpty();
 }
 
-inline const char *DataBuffer::c_str() const
+inline DataPointer<const char *> DataBuffer::c_str() const
 {
-    const char *str = data<const char*>();
-    return str ? str : "";
+    if (!mData)
+        return DataPointer<const char *>();
+    if (mData->pool)
+        mData->pool->lock();
+    return DataPointer<const char *>(mData->pool, reinterpret_cast<const char *>(mData->data));
 }
 
-inline unsigned char *DataBuffer::data()
+inline DataPointer<unsigned char *> DataBuffer::data()
 {
-    return mData ? mData->data : 0;
+    if (!mData)
+        return DataPointer<unsigned char *>();
+    if (mData->pool)
+        mData->pool->lock();
+    return DataPointer<unsigned char *>(mData->pool, mData->data);
 }
 
-inline const unsigned char *DataBuffer::data() const
+inline DataPointer<const unsigned char *> DataBuffer::data() const
 {
-    return mData ? mData->data : 0;
+    if (!mData)
+        return DataPointer<const unsigned char *>();
+    if (mData->pool)
+        mData->pool->lock();
+    return DataPointer<const unsigned char *>(mData->pool, mData->data);
 }
 
-template <typename T> inline T DataBuffer::data()
+template <typename T> inline DataPointer<T> DataBuffer::data()
 {
-    return reinterpret_cast<T>(mData ? mData->data : 0);
+    if (!mData)
+        return DataPointer<T>();
+    if (mData->pool)
+        mData->pool->lock();
+    return DataPointer<T>(mData->pool, reinterpret_cast<T>(mData->data));
 }
 
-template <typename T> inline const T DataBuffer::data() const
+template <typename T> inline DataPointer<const T> DataBuffer::data() const
 {
-    return reinterpret_cast<T>(mData ? mData->data : 0);
+    if (!mData)
+        return DataPointer<const T>();
+    if (mData->pool)
+        mData->pool->lock();
+    return DataPointer<const T>(mData->pool, reinterpret_cast<const T>(mData->data));
 }
 
 inline int DataBuffer::capacity() const
