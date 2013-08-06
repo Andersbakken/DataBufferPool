@@ -14,7 +14,7 @@
 #include <tr1/memory>
 // #include <nrdbase/Noncopyable.h>
 #include <vector>
-#include <set>
+#include <list>
 #include <string>
 #include <ctype.h>
 #include <stdlib.h>
@@ -33,6 +33,12 @@ class Mutex
 public:
     void lock() {}
     void unlock() {}
+};
+
+class ScopedMutex
+{
+public:
+    ScopedMutex(Mutex &) {}
 };
 
 class DataPool // : public Noncopyable
@@ -60,17 +66,20 @@ private:
         int size, capacity;
         enum State {
             Pool,
-            Alloced,
+            Allocated,
             Other
         } state;
         shared_ptr<DataPool> pool;
+
         void resize(int size);
-        void free();
     };
 
-    char *mPool;
+    // void release(Chunk *chunk);
+    void resize(Chunk *chunk, int size);
+
+    unsigned char *mPool;
     int mSize;
-    std::set<shared_ptr<Chunk> > mChunks;
+    std::list<shared_ptr<Chunk> > mChunks;
     friend class DataBuffer;
     Mutex mMutex;
 };
@@ -305,19 +314,21 @@ inline void DataBuffer::clear()
 
 inline void DataBuffer::reserve(int cap)
 {
-    assert(!mData || mData->state == Data::Other);
+    assert(!mData || mData->state != Data::Other);
     assert(!mData || mData.use_count() == 1);
     assert(cap >= 0);
     if (cap) {
         if (!mData) {
             mData.reset(new Data);
-            mData->data = reinterpret_cast<unsigned char*>(realloc(mData->data, cap + 1));
-            DataBuffer::countStats(cap + 1);
-            mData->capacity = cap;
+            mData->resize(cap);
+            // mData->data = reinterpret_cast<unsigned char*>(realloc(mData->data, cap + 1));
+            // DataBuffer::countStats(cap + 1);
+            // mData->capacity = cap;
         } else if (cap != mData->capacity && (cap > mData->capacity || (cap && cap >= mData->size))) {
-            mData->data = reinterpret_cast<unsigned char*>(realloc(mData->data, cap + 1));
-            DataBuffer::countStats(cap - mData->capacity + 1);
-            mData->capacity = cap;
+            mData->resize(cap);
+            // mData->data = reinterpret_cast<unsigned char*>(realloc(mData->data, cap + 1));
+            // DataBuffer::countStats(cap - mData->capacity + 1);
+            // mData->capacity = cap;
         }
     } else if (mData && !mData->size) {
         clear();

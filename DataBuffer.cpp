@@ -30,24 +30,51 @@ void DataBuffer::countStats(int /* count */)
 // }
 
 DataPool::Chunk::Chunk()
+    : data(0), size(0), capacity(0), state(Allocated)
 {
 
 }
 
 DataPool::Chunk::~Chunk()
 {
-
+    if (!pool && data)
+        free(data);
 }
 
 void DataPool::Chunk::resize(int size)
 {
+    if (pool) {
+        pool->resize(this, size);
+    } else {
+        capacity = size;
+        data = reinterpret_cast<unsigned char*>(realloc(data, capacity + 1));
+    }
+    // unsigned char *data;
+    // int size, capacity;
+    // enum State {
+    //     Pool,
+    //     Alloced,
+    //     Other
+    // } state;
 
 }
 
-void DataPool::Chunk::free()
+void DataPool::resize(Chunk *chunk, int size)
 {
 
 }
+
+
+// void DataPool::Chunk::release()
+// {
+//     if (pool) {
+//         pool->release(data, capacity);
+//     } else if (data) {
+//         free(data);
+//     }
+//     data = 0;
+//     size = capacity = 0;
+// }
 
 
 // DataBuffer::Data::~Data()
